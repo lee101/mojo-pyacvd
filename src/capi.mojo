@@ -6,12 +6,10 @@ addresses and retains every allocation for the duration of each call.
 
 from std.math import sqrt
 from std.sys.info import simd_width_of
-from std.algorithm.functional import parallelize
 
 comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime ASSIGN_PARALLEL_THRESHOLD = 16000000
 comptime ASSIGN_BLOCK_SIZE = 1024
 
 
@@ -209,11 +207,8 @@ def mpa_assign(points_addr: Int, centers_addr: Int, labels_addr: Int, n: Int, k:
                     best = dist
                     winner = cluster
             labels[i] = winner
-    if n * k >= ASSIGN_PARALLEL_THRESHOLD:
-        parallelize[assign_block](num_blocks, 4)
-    else:
-        for block in range(num_blocks):
-            assign_block(block)
+    for block in range(num_blocks):
+        assign_block(block)
     var inertia = 0.0
     for i in range(n):
         var offset = 3 * labels[i]
