@@ -132,10 +132,12 @@ class Clustering:
         self.area, self.wcent = point_weights(self.mesh, weights, force_double=True)
         self.area[self.area == 0] = 1e-10
 
-    def cluster(self, nclus: int, maxiter: int = 100, debug: bool = False, iso_try: int = 10, init_only: bool = False) -> np.ndarray:
+    def cluster(self, nclus: int, maxiter: int = 100, debug: bool = False, iso_try: int = 10, init_only: bool = False, device: str = "cpu") -> np.ndarray:
         del debug, iso_try
         if nclus < 1:
             raise ValueError("nclus must be positive.")
+        if device not in ("cpu", "gpu"):
+            raise ValueError("device must be 'cpu' or 'gpu'.")
         points = f64(self.mesh.points)
         self.nclus = min(int(nclus), len(points))
         if nclus >= len(points):
@@ -148,12 +150,19 @@ class Clustering:
         masses = np.empty(self.nclus, dtype=np.float64)
         kernels = lib()
         iterations = 1 if init_only else maxiter
-        for _ in range(iterations):
+        used_gpu = False
+        if device == "gpu":
+            initial_centers = centers.copy()
+            used_gpu = bool(kernels.mpa_lloyd_gpu(addr(points), addr(self.area), addr(labels), addr(centers), addr(sums), addr(masses), len(points), self.nclus, iterations))
+            if not used_gpu:
+                centers[:] = initial_centers
+        if not used_gpu:
+            for _ in range(iterations):
+                kernels.mpa_assign(addr(points), addr(centers), addr(labels), len(points), self.nclus)
+                shift = kernels.mpa_weighted_update(addr(points), addr(self.area), addr(labels), addr(centers), addr(sums), addr(masses), len(points), self.nclus)
+                if shift <= 1e-20:
+                    break
             kernels.mpa_assign(addr(points), addr(centers), addr(labels), len(points), self.nclus)
-            shift = kernels.mpa_weighted_update(addr(points), addr(self.area), addr(labels), addr(centers), addr(sums), addr(masses), len(points), self.nclus)
-            if shift <= 1e-20:
-                break
-        kernels.mpa_assign(addr(points), addr(centers), addr(labels), len(points), self.nclus)
         self.clusters = labels.astype(np.int32)
         self._centers = centers
         return self.clusters

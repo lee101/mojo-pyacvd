@@ -79,6 +79,14 @@ def test_assign_parallel_threshold_matches_serial():
     assert np.all(large_labels.reshape(-1, len(small)) == small_labels)
 
 
+def test_gpu_cluster_matches_cpu_or_falls_back(mesh):
+    cpu = mpa.Clustering(mesh)
+    gpu = mpa.Clustering(mesh)
+    assert np.array_equal(cpu.cluster(24, maxiter=5), gpu.cluster(24, maxiter=5, device="gpu"))
+    with pytest.raises(ValueError):
+        gpu.cluster(24, device="cuda")
+
+
 def test_subdivide_matches_upstream_topology(mesh):
     ours, theirs = mpa.Clustering(mesh), pyacvd.Clustering(mesh)
     ours.subdivide(1)

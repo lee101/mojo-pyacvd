@@ -20,6 +20,7 @@ SIGNATURES = {
     "mpa_farthest_seeds": ([I, I, I, I, I], None),
     "mpa_assign": ([I, I, I, I, I], F),
     "mpa_weighted_update": ([I, I, I, I, I, I, I, I], F),
+    "mpa_lloyd_gpu": ([I, I, I, I, I, I, I, I, I], I),
 }
 
 

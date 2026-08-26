@@ -43,6 +43,10 @@ remesh = clus.create_mesh()
 assert remesh.n_points == 100
 ```
 
+CPU execution is the default. `clus.cluster(100, device="gpu")` explicitly
+requests the optional GPU assignment path; it silently falls back to CPU when a
+GPU is unavailable, has less than 4000 MiB free, or cannot allocate its buffers.
+
 ## How it works
 
 The Python layer keeps PyVista objects and topology handling where that API is
@@ -53,6 +57,12 @@ and remain owned by NumPy for the entire native call. Mojo computes triangle are
 face geometry, nearest Voronoi cells, and weighted centroids in flat row-major
 memory, avoiding temporary Python arrays in the iterative hot path.
 
+Nearest-centre assignment is SIMD-vectorized across points, with a scalar tail,
+and uses parallel blocks only above 8 million point-centre comparisons. The GPU
+path keeps points resident while Lloyd iterations run and copies only centres
+and labels per iteration. The benchmark mesh uses less than 1 MiB of device
+storage; the runtime rejects paths requiring 2 GiB or more.
+
 ## Benchmarks
 
 Measured with `pixi run bench` on this machine. Times are the best of three;
@@ -61,13 +71,14 @@ the full-remesh comparison includes Python/PyVista reconstruction. The mesh had
 
 | kernel | mojo-pyacvd | pyacvd | upstream / Mojo | result |
 |---|---:|---:|---:|---|
-| point_weights | 1.63 ms | 1.17 ms | 0.72x | slower |
-| cluster 96 cells (20 iterations) | 116.03 ms | 11.22 ms | 0.10x | slower |
-| full remesh 96 cells | 144.48 ms | 103.22 ms | 0.71x | slower |
+| point_weights | 0.97 ms | 0.69 ms | 0.71x | slower |
+| cluster 96 cells (20 iterations) | 43.22 ms | 10.08 ms | 0.23x | slower |
+| cluster GPU 96 cells (20 iterations) | 15.46 ms | 8.83 ms | 0.57x | slower |
+| full remesh 96 cells | 64.77 ms | 86.22 ms | 1.33x | faster |
 
-Upstream's compiled, topology-aware ACVD implementation wins these runs.  This
-port deliberately reports that result rather than claiming an unmeasured
-speedup; its value is a small, standalone Mojo kernel boundary and a
-deterministic weighted-Voronoi implementation.
-
-There is no GPU path. The current kernels are CPU-only.
+Upstream still wins the standalone point-weight and clustering comparisons;
+the Mojo port wins the full-remesh measurement. The point-weight face scatter
+is low arithmetic intensity and remains CPU-only: its native kernel measured
+0.41 ms, while validation, float64 conversion, and output setup dominate the
+public call. Moving that work to the GPU would add transfers without enough
+computation to recover their cost.
