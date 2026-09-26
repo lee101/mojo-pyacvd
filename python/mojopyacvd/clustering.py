@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pyvista as pv
 
-from ._lib import addr, f64, i64, lib
+from ._lib import addr, assign, f64, i64, lib
 
 
 def _points(value, *, name: str = "points") -> np.ndarray:
@@ -158,11 +158,11 @@ class Clustering:
                 centers[:] = initial_centers
         if not used_gpu:
             for _ in range(iterations):
-                kernels.mpa_assign(addr(points), addr(centers), addr(labels), len(points), self.nclus)
+                assign(kernels, points, centers, labels)
                 shift = kernels.mpa_weighted_update(addr(points), addr(self.area), addr(labels), addr(centers), addr(sums), addr(masses), len(points), self.nclus)
                 if shift <= 1e-20:
                     break
-            kernels.mpa_assign(addr(points), addr(centers), addr(labels), len(points), self.nclus)
+            assign(kernels, points, centers, labels)
         self.clusters = labels.astype(np.int32)
         self._centers = centers
         return self.clusters

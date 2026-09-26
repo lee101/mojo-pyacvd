@@ -58,7 +58,12 @@ face geometry, nearest Voronoi cells, and weighted centroids in flat row-major
 memory, avoiding temporary Python arrays in the iterative hot path.
 
 Nearest-centre assignment is SIMD-vectorized across points, with a scalar tail,
-and uses parallel blocks only above 8 million point-centre comparisons. The GPU
+and splits into contiguous blocks above 8 million point-centre comparisons.
+That pass is compute bound rather than bandwidth bound -- about eight flops per
+cluster per point against 32 bytes of point and label traffic, so arithmetic
+intensity is k/4 flops per byte and reaches two at eight clusters -- so above
+the threshold the blocks are fanned out over a `ThreadPoolExecutor` that
+releases the GIL for each foreign call. The GPU
 path keeps points resident while Lloyd iterations run and copies only centres
 and labels per iteration. The benchmark mesh uses less than 1 MiB of device
 storage; the runtime rejects paths requiring 2 GiB or more.

@@ -4,9 +4,8 @@ The ABI owns no memory.  Python passes contiguous float64/int64 buffers as
 addresses and retains every allocation for the duration of each call.
 """
 
-from max.algorithm import parallelize
 from max.gpu.host import DeviceContext
-from std.gpu import global_idx
+from max.gpu import global_idx
 from std.math import sqrt
 from std.sys.info import simd_width_of
 
@@ -15,8 +14,6 @@ comptime IPtr = UnsafePointer[Int, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
 comptime ASSIGN_BLOCK_SIZE = 1024
-comptime ASSIGN_PARALLEL_THRESHOLD = 8_000_000
-comptime ASSIGN_WORKERS = 16
 
 
 def triangle_area(points: FPtr, a: Int, b: Int, c: Int) -> Float64:
@@ -200,60 +197,50 @@ def mpa_face_normals(points_addr: Int, faces_addr: Int, dst_addr: Int, nfaces: I
             dst[3 * t + 2] = 0.0
 
 
-@export("mpa_assign")
-def mpa_assign(points_addr: Int, centers_addr: Int, labels_addr: Int, n: Int, k: Int) abi("C") -> Float64:
-    var points = FPtr(unsafe_from_address=points_addr)
-    var centers = FPtr(unsafe_from_address=centers_addr)
-    var labels = IPtr(unsafe_from_address=labels_addr)
-    var num_blocks = (n + ASSIGN_BLOCK_SIZE - 1) // ASSIGN_BLOCK_SIZE
-    @__copy_capture(points, centers, labels, n, k)
-    @parameter
-    def assign_block(block: Int) capturing:
-        var start = block * ASSIGN_BLOCK_SIZE
-        var stop = min(start + ASSIGN_BLOCK_SIZE, n)
-        var i = start
-        while i + W <= stop:
-            var px = (points + 3 * i).strided_load[width=W](3)
-            var py = (points + 3 * i + 1).strided_load[width=W](3)
-            var pz = (points + 3 * i + 2).strided_load[width=W](3)
-            var dx = px - centers[0]
-            var dy = py - centers[1]
-            var dz = pz - centers[2]
-            var best = dx * dx + dy * dy + dz * dz
-            var winners = SIMD[DType.int, W](0)
-            for cluster in range(1, k):
-                dx = px - centers[3 * cluster]
-                dy = py - centers[3 * cluster + 1]
-                dz = pz - centers[3 * cluster + 2]
-                var dist = dx * dx + dy * dy + dz * dz
-                var improved = dist.lt(best)
-                best = improved.select(dist, best)
-                winners = improved.select(
-                    SIMD[DType.int, W](cluster), winners
-                )
-            labels.store(i, winners)
-            i += W
-        while i < stop:
-            var dx = points[3 * i] - centers[0]
-            var dy = points[3 * i + 1] - centers[1]
-            var dz = points[3 * i + 2] - centers[2]
-            var best = dx * dx + dy * dy + dz * dz
-            var winner = 0
-            for cluster in range(1, k):
-                dx = points[3 * i] - centers[3 * cluster]
-                dy = points[3 * i + 1] - centers[3 * cluster + 1]
-                dz = points[3 * i + 2] - centers[3 * cluster + 2]
-                var dist = dx * dx + dy * dy + dz * dz
-                if dist < best:
-                    best = dist
-                    winner = cluster
-            labels[i] = winner
-            i += 1
-    if n * k >= ASSIGN_PARALLEL_THRESHOLD and num_blocks > 1:
-        parallelize[assign_block](num_blocks, min(num_blocks, ASSIGN_WORKERS))
-    else:
-        for block in range(num_blocks):
-            assign_block(block)
+def assign_range(
+    points: FPtr, centers: FPtr, labels: IPtr, k: Int, start: Int, stop: Int
+):
+    var i = start
+    while i + W <= stop:
+        var px = (points + 3 * i).strided_load[width=W](3)
+        var py = (points + 3 * i + 1).strided_load[width=W](3)
+        var pz = (points + 3 * i + 2).strided_load[width=W](3)
+        var dx = px - centers[0]
+        var dy = py - centers[1]
+        var dz = pz - centers[2]
+        var best = dx * dx + dy * dy + dz * dz
+        var winners = SIMD[DType.int, W](0)
+        for cluster in range(1, k):
+            dx = px - centers[3 * cluster]
+            dy = py - centers[3 * cluster + 1]
+            dz = pz - centers[3 * cluster + 2]
+            var dist = dx * dx + dy * dy + dz * dz
+            var improved = dist.lt(best)
+            best = improved.select(dist, best)
+            winners = improved.select(SIMD[DType.int, W](cluster), winners)
+        labels.store(i, winners)
+        i += W
+    while i < stop:
+        var dx = points[3 * i] - centers[0]
+        var dy = points[3 * i + 1] - centers[1]
+        var dz = points[3 * i + 2] - centers[2]
+        var best = dx * dx + dy * dy + dz * dz
+        var winner = 0
+        for cluster in range(1, k):
+            dx = points[3 * i] - centers[3 * cluster]
+            dy = points[3 * i + 1] - centers[3 * cluster + 1]
+            dz = points[3 * i + 2] - centers[3 * cluster + 2]
+            var dist = dx * dx + dy * dy + dz * dz
+            if dist < best:
+                best = dist
+                winner = cluster
+        labels[i] = winner
+        i += 1
+
+
+def assign_inertia(
+    points: FPtr, centers: FPtr, labels: IPtr, n: Int
+) -> Float64:
     var inertia = 0.0
     for i in range(n):
         var offset = 3 * labels[i]
@@ -262,6 +249,57 @@ def mpa_assign(points_addr: Int, centers_addr: Int, labels_addr: Int, n: Int, k:
         var dz = points[3 * i + 2] - centers[offset + 2]
         inertia += dx * dx + dy * dy + dz * dz
     return inertia
+
+
+@export("mpa_assign_range")
+def mpa_assign_range(
+    points_addr: Int,
+    centers_addr: Int,
+    labels_addr: Int,
+    k: Int,
+    start: Int,
+    stop: Int,
+) abi("C"):
+    if points_addr == 0 or centers_addr == 0 or labels_addr == 0:
+        return
+    if k <= 0 or start < 0 or stop <= start:
+        return
+    assign_range(
+        FPtr(unsafe_from_address=points_addr),
+        FPtr(unsafe_from_address=centers_addr),
+        IPtr(unsafe_from_address=labels_addr),
+        k,
+        start,
+        stop,
+    )
+
+
+@export("mpa_inertia")
+def mpa_inertia(
+    points_addr: Int, centers_addr: Int, labels_addr: Int, n: Int
+) abi("C") -> Float64:
+    if points_addr == 0 or centers_addr == 0 or labels_addr == 0 or n <= 0:
+        return 0.0
+    return assign_inertia(
+        FPtr(unsafe_from_address=points_addr),
+        FPtr(unsafe_from_address=centers_addr),
+        IPtr(unsafe_from_address=labels_addr),
+        n,
+    )
+
+
+@export("mpa_assign")
+def mpa_assign(points_addr: Int, centers_addr: Int, labels_addr: Int, n: Int, k: Int) abi("C") -> Float64:
+    var points = FPtr(unsafe_from_address=points_addr)
+    var centers = FPtr(unsafe_from_address=centers_addr)
+    var labels = IPtr(unsafe_from_address=labels_addr)
+    var num_blocks = (n + ASSIGN_BLOCK_SIZE - 1) // ASSIGN_BLOCK_SIZE
+    for block in range(num_blocks):
+        var start = block * ASSIGN_BLOCK_SIZE
+        assign_range(
+            points, centers, labels, k, start, min(start + ASSIGN_BLOCK_SIZE, n)
+        )
+    return assign_inertia(points, centers, labels, n)
 
 
 @export("mpa_weighted_update")
